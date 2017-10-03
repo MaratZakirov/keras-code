@@ -1,0 +1,224 @@
+from keras.layers import Recurrent
+from keras.models import Sequential
+from keras.utils.visualize_util import plot
+import numpy as np
+import keras
+from keras import backend as K
+from keras import activations
+from keras import initializations
+from keras import regularizers
+from keras.engine import InputSpec
+
+class mLSTM(Recurrent):
+    def __init__(self, output_dim,
+                 init='glorot_uniform', inner_init='orthogonal',
+                 forget_bias_init='one', activation='tanh',
+                 inner_activation='hard_sigmoid',
+                 W_regularizer=None, U_regularizer=None, b_regularizer=None,
+                 dropout_W=0., dropout_U=0., **kwargs):
+        # Temporaly mdim equal to output dim
+        self.m_dim = output_dim + 3
+
+        self.output_dim = output_dim
+        self.init = initializations.get(init)
+        self.inner_init = initializations.get(inner_init)
+        self.forget_bias_init = initializations.get(forget_bias_init)
+        self.activation = activations.get(activation)
+        self.inner_activation = activations.get(inner_activation)
+        self.W_regularizer = regularizers.get(W_regularizer)
+        self.U_regularizer = regularizers.get(U_regularizer)
+        self.b_regularizer = regularizers.get(b_regularizer)
+        self.dropout_W = dropout_W
+        self.dropout_U = dropout_U
+
+        if self.dropout_W or self.dropout_U:
+            self.uses_learning_phase = True
+        super(mLSTM, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        self.input_spec = [InputSpec(shape=input_shape)]
+        self.input_dim = input_shape[2]
+
+        if self.stateful:
+            self.reset_states()
+        else:
+            # initial states: 2 all-zero tensors of shape (output_dim)
+            self.states = [None, None]
+
+        self.W_mx = self.add_weight((self.input_dim, self.m_dim),
+                                   initializer=self.init,
+                                   name='{}_W_mx'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.U_mh = self.add_weight((self.output_dim, self.m_dim),
+                                   initializer=self.init,
+                                   name='{}_U_mh'.format(self.name),
+                                   regularizer=self.U_regularizer)
+
+
+        self.W_i = self.add_weight((self.input_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_W_i'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.U_i = self.add_weight((self.m_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_U_i'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.b_i = self.add_weight((self.output_dim,),
+                                   initializer='zero',
+                                   name='{}_b_i'.format(self.name),
+                                   regularizer=self.b_regularizer)
+        self.W_f = self.add_weight((self.input_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_W_f'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.U_f = self.add_weight((self.m_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_U_f'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.b_f = self.add_weight((self.output_dim,),
+                                   initializer=self.forget_bias_init,
+                                   name='{}_b_f'.format(self.name),
+                                   regularizer=self.b_regularizer)
+        self.W_c = self.add_weight((self.input_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_W_c'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.U_c = self.add_weight((self.m_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_U_c'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.b_c = self.add_weight((self.output_dim,),
+                                   initializer='zero',
+                                   name='{}_b_c'.format(self.name),
+                                   regularizer=self.b_regularizer)
+        self.W_o = self.add_weight((self.input_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_W_o'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.U_o = self.add_weight((self.m_dim, self.output_dim),
+                                   initializer=self.init,
+                                   name='{}_U_o'.format(self.name),
+                                   regularizer=self.W_regularizer)
+        self.b_o = self.add_weight((self.output_dim,),
+                                   initializer='zero',
+                                   name='{}_b_o'.format(self.name),
+                                   regularizer=self.b_regularizer)
+
+        self.trainable_weights = [self.W_i, self.U_i, self.b_i,
+                                  self.W_c, self.U_c, self.b_c,
+                                  self.W_f, self.U_f, self.b_f,
+                                  self.W_o, self.U_o, self.b_o,
+                                  self.W_mx, self.U_mh]
+        self.W = K.concatenate([self.W_i, self.W_f, self.W_c, self.W_o])
+        self.U = K.concatenate([self.U_i, self.U_f, self.U_c, self.U_o])
+        self.b = K.concatenate([self.b_i, self.b_f, self.b_c, self.b_o])
+
+        if self.initial_weights is not None:
+            self.set_weights(self.initial_weights)
+            del self.initial_weights
+        self.built = True
+
+    def reset_states(self):
+        assert self.stateful, 'Layer must be stateful.'
+        input_shape = self.input_spec[0].shape
+        if not input_shape[0]:
+            raise ValueError('If a RNN is stateful, a complete ' +
+                             'input_shape must be provided (including batch size).')
+        if hasattr(self, 'states'):
+            K.set_value(self.states[0],
+                        np.zeros((input_shape[0], self.output_dim)))
+            K.set_value(self.states[1],
+                        np.zeros((input_shape[0], self.output_dim)))
+        else:
+            self.states = [K.zeros((input_shape[0], self.output_dim)),
+                           K.zeros((input_shape[0], self.output_dim))]
+
+    def preprocess_input(self, x):
+        return x
+
+    def step(self, x, states):
+        h_tm1 = states[0]
+        c_tm1 = states[1]
+        B_U = states[2]
+        B_W = states[3]
+
+        if self.consume_less == 'gpu':
+            m_t = K.dot(x * B_W[4], self.W_mx) * K.dot(h_tm1, self.U_mh)
+
+            z = K.dot(x * B_W[0], self.W) + K.dot(m_t * B_U[0], self.U) + self.b
+
+            z0 = z[:, :self.output_dim]
+            z1 = z[:, self.output_dim: 2 * self.output_dim]
+            z2 = z[:, 2 * self.output_dim: 3 * self.output_dim]
+            z3 = z[:, 3 * self.output_dim:]
+
+            i = self.inner_activation(z0)
+            f = self.inner_activation(z1)
+            c = f * c_tm1 + i * self.activation(z2)
+            o = self.inner_activation(z3)
+        else:
+            m_t = K.dot(x * B_W[4], self.W_mx) * K.dot(h_tm1, self.U_mh)
+
+            x_i = K.dot(x * B_W[0], self.W_i) + self.b_i
+            x_f = K.dot(x * B_W[1], self.W_f) + self.b_f
+            x_c = K.dot(x * B_W[2], self.W_c) + self.b_c
+            x_o = K.dot(x * B_W[3], self.W_o) + self.b_o
+
+            i = self.inner_activation(x_i + K.dot(m_t * B_U[0], self.U_i))
+            f = self.inner_activation(x_f + K.dot(m_t * B_U[1], self.U_f))
+            c = f * c_tm1 + i * self.activation(x_c + K.dot(m_t * B_U[2], self.U_c))
+            o = self.inner_activation(x_o + K.dot(m_t * B_U[3], self.U_o))
+
+        h = o * self.activation(c)
+        return h, [h, c]
+
+    def get_constants(self, x):
+        constants = []
+        if 0 < self.dropout_U < 1:
+            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
+            ones = K.tile(ones, (1, self.m_dim))
+            B_U = [K.in_train_phase(K.dropout(ones, self.dropout_U), ones) for _ in range(4)]
+            constants.append(B_U)
+        else:
+            constants.append([K.cast_to_floatx(1.) for _ in range(5)])
+
+        if 0 < self.dropout_W < 1:
+            input_shape = K.int_shape(x)
+            input_dim = input_shape[-1]
+            ones = K.ones_like(K.reshape(x[:, 0, 0], (-1, 1)))
+            ones = K.tile(ones, (1, int(input_dim)))
+            B_W = [K.in_train_phase(K.dropout(ones, self.dropout_W), ones) for _ in range(5)]
+            constants.append(B_W)
+        else:
+            constants.append([K.cast_to_floatx(1.) for _ in range(5)])
+
+        return constants
+
+    def get_config(self):
+        config = {'output_dim': self.output_dim,
+                  'init': self.init.__name__,
+                  'inner_init': self.inner_init.__name__,
+                  'forget_bias_init': self.forget_bias_init.__name__,
+                  'activation': self.activation.__name__,
+                  'inner_activation': self.inner_activation.__name__,
+                  'W_regularizer': self.W_regularizer.get_config() if self.W_regularizer else None,
+                  'U_regularizer': self.U_regularizer.get_config() if self.U_regularizer else None,
+                  'b_regularizer': self.b_regularizer.get_config() if self.b_regularizer else None,
+                  'dropout_W': self.dropout_W,
+                  'dropout_U': self.dropout_U}
+        base_config = super(mLSTM, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+print keras.__version__
+
+model = Sequential()
+mst = mLSTM(10, input_shape=(10, 100), consume_less='gpu', dropout_W=0.2, dropout_U=0.1)
+model.add(mst)
+model.compile(optimizer='adam', loss='mse')
+
+plot(model, to_file='model.png')
+
+X = np.random.uniform(low=-1.0, high=1.0, size=(1000, 10, 100)).astype('float32')
+Y = np.random.uniform(low=-1.0, high=1.0, size=(1000, 10)).astype('float32')
+
+model.fit(x=X, y=Y)
